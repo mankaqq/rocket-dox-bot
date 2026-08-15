@@ -10,35 +10,26 @@ import sqlite3
 import os
 import re
 import socket
-import hashlib
 from flask import Flask, request, jsonify
-from collections import defaultdict
 
-# ==================== КОНФИГУРАЦИЯ ====================
 TOKEN = "8905534019:AAFcWkZQsyq4147cFuYID5TuW65ssgmxmx4"
-ADMIN_ID = 8171219348
 PORT = int(os.environ.get("PORT", 5000))
-DB_PATH = "phone_numbers.db"
 
-# ==================== FLASK ====================
 app = Flask(__name__)
 
-# ==================== БАЗА ДАННЫХ ПОЛЬЗОВАТЕЛЕЙ ====================
-def init_user_db():
+# ===== БАЗА ДАННЫХ ПОЛЬЗОВАТЕЛЕЙ =====
+def init_db():
     conn = sqlite3.connect("users.db")
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         chat_id INTEGER PRIMARY KEY,
         requests INTEGER DEFAULT 0,
-        last_request TEXT,
-        banned INTEGER DEFAULT 0
+        last_request TEXT
     )''')
     conn.commit()
     conn.close()
+init_db()
 
-init_user_db()
-
-# ==================== ЛИМИТЫ ====================
 def check_limit(chat_id):
     conn = sqlite3.connect("users.db")
     c = conn.cursor()
@@ -59,46 +50,61 @@ def check_limit(chat_id):
     conn.close()
     return True
 
-# ==================== МОДУЛИ ====================
+# ===== ОПРЕДЕЛЕНИЕ ОПЕРАТОРА =====
+def get_operator(phone):
+    cleaned = ''.join(filter(str.isdigit, phone))
+    if not cleaned.startswith('7') or len(cleaned) < 11:
+        return "❌ Неверный номер"
+    
+    codes = {
+        "900": "МТС", "901": "МТС", "902": "МТС", "903": "МТС",
+        "904": "МТС", "905": "МТС", "906": "МТС", "909": "МТС",
+        "910": "МТС", "911": "МТС", "912": "МТС", "913": "МТС",
+        "914": "МТС", "915": "МТС", "916": "МТС", "917": "МТС",
+        "918": "МТС", "919": "МТС",
+        "920": "МТС", "921": "МТС", "922": "МТС", "923": "МТС",
+        "924": "МТС", "925": "МТС", "926": "МТС", "927": "МТС",
+        "928": "МТС", "929": "МТС",
+        "930": "Мегафон", "931": "Мегафон", "932": "Мегафон",
+        "933": "Мегафон", "934": "Мегафон", "935": "Мегафон",
+        "936": "Мегафон", "937": "Мегафон", "938": "Мегафон",
+        "939": "Мегафон",
+        "950": "Tele2", "951": "Tele2", "952": "Tele2",
+        "953": "Tele2", "954": "Tele2", "955": "Tele2",
+        "956": "Tele2", "958": "Tele2",
+        "960": "Билайн", "961": "Билайн", "962": "Билайн",
+        "963": "Билайн", "964": "Билайн", "965": "Билайн",
+        "966": "Билайн", "967": "Билайн", "968": "Билайн",
+        "969": "Билайн",
+        "980": "Билайн", "981": "Билайн", "982": "Билайн",
+        "983": "Билайн", "984": "Билайн", "985": "Билайн",
+        "986": "Билайн", "987": "Билайн", "988": "Билайн",
+        "989": "Билайн",
+        "999": "Yota"
+    }
+    code = cleaned[1:4]
+    return codes.get(code, "❌ Неизвестно")
 
-# ---- BIN CHECKER ----
-def bin_lookup(bin6):
-    url = f"https://lookup.binlist.net/{bin6}"
-    try:
-        req = urllib.request.Request(url)
-        req.add_header('Accept-Version', '3')
-        response = urllib.request.urlopen(req, timeout=5)
-        data = json.loads(response.read().decode())
-        return {
-            "scheme": data.get("scheme", "N/A"),
-            "type": data.get("type", "N/A"),
-            "brand": data.get("brand", "N/A"),
-            "bank": data.get("bank", {}).get("name", "N/A"),
-            "country": data.get("country", {}).get("name", "N/A")
-        }
-    except:
-        return None
-
-# ---- EMAIL VALID + HIBP ----
+# ===== ПРОВЕРКА EMAIL =====
 def check_email(email):
-    # Валидация
     if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
-        return {"valid": False, "breaches": []}
-    # HIBP
+        return "❌ Неверный email"
     breaches = []
     try:
         url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}"
         req = urllib.request.Request(url)
-        req.add_header('User-Agent', 'ROCKET-DOX-Bot')
+        req.add_header('User-Agent', 'ROCKET-Bot')
         response = urllib.request.urlopen(req, timeout=10)
         if response.getcode() == 200:
             data = json.loads(response.read().decode())
             breaches = [b["Name"] for b in data]
     except:
         pass
-    return {"valid": True, "breaches": breaches}
+    if breaches:
+        return f"✅ Найден в утечках: {', '.join(breaches[:3])}"
+    return "✅ Не найден в утечках"
 
-# ---- USERNAME SEARCH ----
+# ===== ПОИСК USERNAME =====
 def search_username(username):
     sites = {
         "GitHub": f"https://github.com/{username}",
@@ -106,18 +112,7 @@ def search_username(username):
         "Twitter": f"https://twitter.com/{username}",
         "VK": f"https://vk.com/{username}",
         "Telegram": f"https://t.me/{username}",
-        "YouTube": f"https://youtube.com/@{username}",
-        "Reddit": f"https://reddit.com/user/{username}",
-        "TikTok": f"https://tiktok.com/@{username}",
-        "Discord": f"https://discord.com/users/{username}",
-        "Twitch": f"https://twitch.tv/{username}",
-        "Steam": f"https://steamcommunity.com/id/{username}",
-        "Spotify": f"https://open.spotify.com/user/{username}",
-        "SoundCloud": f"https://soundcloud.com/{username}",
-        "Medium": f"https://medium.com/@{username}",
-        "Quora": f"https://quora.com/profile/{username}",
-        "GitLab": f"https://gitlab.com/{username}",
-        "Pastebin": f"https://pastebin.com/u/{username}"
+        "YouTube": f"https://youtube.com/@{username}"
     }
     found = {}
     for site, url in sites.items():
@@ -131,96 +126,121 @@ def search_username(username):
             pass
     return found
 
-# ---- GEOIP ----
+# ===== BIN CHECKER =====
+def bin_lookup(bin6):
+    try:
+        url = f"https://lookup.binlist.net/{bin6}"
+        req = urllib.request.Request(url)
+        req.add_header('Accept-Version', '3')
+        response = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(response.read().decode())
+        return {
+            "Банк": data.get("bank", {}).get("name", "N/A"),
+            "Страна": data.get("country", {}).get("name", "N/A"),
+            "Тип": data.get("type", "N/A"),
+            "Бренд": data.get("brand", "N/A")
+        }
+    except:
+        return None
+
+# ===== GEOIP =====
 def geoip(ip):
     try:
         url = f"http://ip-api.com/json/{ip}"
-        response = urllib.request.urlopen(url, timeout=5)
+        response = urllib.request.urlopen(url, timeout=10)
         data = json.loads(response.read().decode())
         if data.get("status") == "success":
             return {
-                "country": data.get("country", "N/A"),
-                "city": data.get("city", "N/A"),
-                "region": data.get("regionName", "N/A"),
-                "isp": data.get("isp", "N/A"),
-                "lat": data.get("lat", 0),
-                "lon": data.get("lon", 0)
+                "Страна": data.get("country", "N/A"),
+                "Город": data.get("city", "N/A"),
+                "Провайдер": data.get("isp", "N/A")
             }
     except:
         pass
     return None
 
-# ---- TELEGRAM OSINT ----
-def telegram_osint(username):
-    # Простая проверка существования канала/бота
-    try:
-        url = f"https://t.me/{username}"
-        req = urllib.request.Request(url)
-        req.add_header('User-Agent', 'Mozilla/5.0')
-        response = urllib.request.urlopen(req, timeout=5)
-        if response.getcode() == 200:
-            return {"exists": True, "url": url}
-    except:
-        pass
-    return {"exists": False}
+# ===== ОБРАБОТКА СООБЩЕНИЙ =====
+def process_message(text, first_name="Друг"):
+    text = text.strip()
+    
+    if text == "/start":
+        return f"👋 Привет, {first_name}!\nОтправь номер, email, username или используй команды:\n/dox номер\n/email email\n/user username\n/bin 6 цифр\n/ip адрес"
+    
+    if text.startswith("/dox"):
+        parts = text.split(maxsplit=1)
+        if len(parts) > 1:
+            phone = parts[1].strip()
+            operator = get_operator(phone)
+            return f"📱 Номер: {phone}\n📊 Оператор: {operator}\n🇷🇺 Страна: Россия"
+        return "📱 Пример: /dox 79001234567"
+    
+    if text.startswith("/email"):
+        parts = text.split(maxsplit=1)
+        if len(parts) > 1:
+            return check_email(parts[1].strip())
+        return "📧 Пример: /email test@mail.ru"
+    
+    if text.startswith("/user"):
+        parts = text.split(maxsplit=1)
+        if len(parts) > 1:
+            found = search_username(parts[1].strip())
+            if found:
+                result = f"👤 {parts[1]} найден:\n"
+                for site, url in found.items():
+                    result += f"├ {site}: {url}\n"
+                return result
+            return f"❌ {parts[1]} не найден"
+        return "👤 Пример: /user john_doe"
+    
+    if text.startswith("/bin"):
+        parts = text.split(maxsplit=1)
+        if len(parts) > 1 and len(parts[1]) == 6 and parts[1].isdigit():
+            data = bin_lookup(parts[1])
+            if data:
+                return f"💳 BIN: {parts[1]}\n🏦 Банк: {data['Банк']}\n🌍 Страна: {data['Страна']}\n📌 Тип: {data['Тип']}\n🏷️ Бренд: {data['Бренд']}"
+            return "❌ BIN не найден"
+        return "💳 Пример: /bin 411111"
+    
+    if text.startswith("/ip"):
+        parts = text.split(maxsplit=1)
+        if len(parts) > 1:
+            ip = parts[1].strip()
+            if re.match(r'^(\d{1,3}\.){3}\d{1,3}$', ip):
+                data = geoip(ip)
+                if data:
+                    return f"🌍 IP: {ip}\n📍 Страна: {data['Страна']}\n🏙️ Город: {data['Город']}\n📡 Провайдер: {data['Провайдер']}"
+            return "❌ Неверный IP"
+        return "🌍 Пример: /ip 8.8.8.8"
+    
+    # Если просто номер
+    if re.match(r'^[78]\d{10}$', text):
+        operator = get_operator(text)
+        return f"📱 Номер: {text}\n📊 Оператор: {operator}\n🇷🇺 Страна: Россия"
+    
+    # Если просто email
+    if re.match(r"[^@]+@[^@]+\.[^@]+", text):
+        return check_email(text)
+    
+    # Если просто username
+    if re.match(r'^[a-zA-Z0-9_]{3,20}$', text):
+        found = search_username(text)
+        if found:
+            result = f"👤 {text} найден:\n"
+            for site, url in found.items():
+                result += f"├ {site}: {url}\n"
+            return result
+        return f"❌ {text} не найден"
+    
+    # Если просто BIN
+    if re.match(r'^\d{6}$', text):
+        data = bin_lookup(text)
+        if data:
+            return f"💳 BIN: {text}\n🏦 Банк: {data['Банк']}\n🌍 Страна: {data['Страна']}\n📌 Тип: {data['Тип']}\n🏷️ Бренд: {data['Бренд']}"
+        return "❌ BIN не найден"
+    
+    return "❌ Неизвестная команда. Используй /start"
 
-# ---- DOX (ОПЕРАТОР, РЕГИОН) ----
-def analyze_phone(phone):
-    cleaned = ''.join(filter(str.isdigit, phone))
-    result = {"country": "❌ Неизвестно", "operator": "❌ Неизвестно"}
-    if cleaned.startswith('7') and len(cleaned) >= 11:
-        result["country"] = "🇷🇺 Россия"
-        codes = {
-            "900": "МТС", "901": "МТС", "902": "МТС", "903": "МТС",
-            "904": "МТС", "905": "МТС", "906": "МТС", "909": "МТС",
-            "910": "МТС", "911": "МТС", "912": "МТС", "913": "МТС",
-            "914": "МТС", "915": "МТС", "916": "МТС", "917": "МТС",
-            "918": "МТС", "919": "МТС",
-            "920": "МТС", "921": "МТС", "922": "МТС", "923": "МТС",
-            "924": "МТС", "925": "МТС", "926": "МТС", "927": "МТС",
-            "928": "МТС", "929": "МТС",
-            "930": "Мегафон", "931": "Мегафон", "932": "Мегафон",
-            "933": "Мегафон", "934": "Мегафон", "935": "Мегафон",
-            "936": "Мегафон", "937": "Мегафон", "938": "Мегафон",
-            "939": "Мегафон",
-            "950": "Tele2", "951": "Tele2", "952": "Tele2",
-            "953": "Tele2", "954": "Tele2", "955": "Tele2",
-            "956": "Tele2", "958": "Tele2",
-            "960": "Билайн", "961": "Билайн", "962": "Билайн",
-            "963": "Билайн", "964": "Билайн", "965": "Билайн",
-            "966": "Билайн", "967": "Билайн", "968": "Билайн",
-            "969": "Билайн",
-            "980": "Билайн", "981": "Билайн", "982": "Билайн",
-            "983": "Билайн", "984": "Билайн", "985": "Билайн",
-            "986": "Билайн", "987": "Билайн", "988": "Билайн",
-            "989": "Билайн",
-            "999": "Yota"
-        }
-        code = cleaned[1:4] if len(cleaned) >= 11 else cleaned[0:3]
-        result["operator"] = codes.get(code, "❌ Неизвестно")
-    elif cleaned.startswith('380') and len(cleaned) >= 12:
-        result["country"] = "🇺🇦 Украина"
-        codes = {
-            "50": "Vodafone", "66": "Vodafone", "67": "Vodafone",
-            "95": "Vodafone", "99": "Vodafone",
-            "68": "Kyivstar", "96": "Kyivstar", "97": "Kyivstar",
-            "98": "Kyivstar",
-            "63": "lifecell", "73": "lifecell", "93": "lifecell"
-        }
-        code = cleaned[3:5] if len(cleaned) >= 12 else cleaned[0:2]
-        result["operator"] = codes.get(code, "❌ Неизвестно")
-    return result
-
-# ---- ФОРМАТИРОВЩИК ОТВЕТА ----
-def format_response(title, data):
-    out = f"╔══════════════════════════════════╗\n"
-    out += f"║  {title:<30} ║\n"
-    out += f"╚══════════════════════════════════╝\n"
-    for k, v in data.items():
-        out += f"├ {k}: {v}\n"
-    return out
-
-# ==================== TELEGRAM API ====================
+# ===== TELEGRAM API =====
 def send_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
@@ -228,152 +248,53 @@ def send_message(chat_id, text):
     try:
         req = urllib.request.Request(url, data=post_data)
         req.add_header('Content-Type', 'application/x-www-form-urlencoded')
-        urllib.request.urlopen(req, timeout=10)
+        urllib.request.urlopen(req, timeout=30)
         return True
     except Exception as e:
-        print(f"Ошибка отправки: {e}")
+        print(f"Ошибка: {e}")
         return False
 
-def get_keyboard():
-    return {
-        "keyboard": [
-            [{"text": "🔍 DOX"}, {"text": "📧 EMAIL"}],
-            [{"text": "👤 USERNAME"}, {"text": "💳 BIN"}],
-            [{"text": "🌍 GEOIP"}, {"text": "📱 TG OSINT"}],
-            [{"text": "ℹ️ ПОМОЩЬ"}, {"text": "💎 DONATE"}]
-        ],
-        "resize_keyboard": True
-    }
-
-# ==================== ОБРАБОТЧИК СООБЩЕНИЙ ====================
-def process_message(chat_id, text, first_name="Друг"):
-    if not check_limit(chat_id):
-        return "⚠️ Лимит 5 запросов в день. Попробуй завтра или задонать 💎"
-
-    text = text.strip().lower()
-
-    if text == "/start":
-        return f"👋 Привет, {first_name}!\nВыбери команду на клавиатуре."
-
-    if text in ["/help", "ℹ️ помощь", "помощь"]:
-        return "🔍 DOX — оператор/регион\n📧 EMAIL — проверка утечек\n👤 USERNAME — поиск в соцсетях\n💳 BIN — банк по карте\n🌍 GEOIP — город/страна по IP\n📱 TG OSINT — проверка Telegram"
-
-    if text == "💎 donate":
-        return "💎 Поддержать проект:\nBTC: 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa\nUSDT TRC20: T..."
-
-    # DOX
-    if text == "🔍 dox":
-        return "📱 Введи номер (пример: 79001234567)"
-
-    # EMAIL
-    if text == "📧 email":
-        return "📧 Введи email (пример: test@mail.ru)"
-
-    # USERNAME
-    if text == "👤 username":
-        return "👤 Введи username (пример: john_doe)"
-
-    # BIN
-    if text == "💳 bin":
-        return "💳 Введи первые 6 цифр карты (пример: 411111)"
-
-    # GEOIP
-    if text == "🌍 geoip":
-        return "🌍 Введи IP (пример: 8.8.8.8) или домен"
-
-    # TG OSINT
-    if text == "📱 tg osint":
-        return "📱 Введи username Telegram (пример: durov)"
-
-    # ---- ОБРАБОТКА ВВОДА ----
-    # DOX
-    if re.match(r'^[78]\d{10}$', text):
-        phone = "+" + text if not text.startswith('+') else text
-        info = analyze_phone(phone)
-        return format_response("📱 DOX", {"Телефон": phone, "Оператор": info["operator"], "Страна": info["country"]})
-
-    # EMAIL
-    if re.match(r"[^@]+@[^@]+\.[^@]+", text):
-        res = check_email(text)
-        if res["valid"]:
-            breaches = ", ".join(res["breaches"][:5]) if res["breaches"] else "✅ Не найден в утечках"
-            return format_response("📧 EMAIL", {"Email": text, "Утечки": breaches})
-        return "❌ Неверный email"
-
-    # USERNAME
-    if not re.search(r'[^a-zA-Z0-9_]', text) and len(text) > 2:
-        found = search_username(text)
-        if found:
-            out = f"👤 {text} найден:\n"
-            for site, url in found.items():
-                out += f"├ {site}: {url}\n"
-            return out
-        return f"❌ {text} не найден"
-
-    # BIN
-    if re.match(r'^\d{6}$', text):
-        bin_data = bin_lookup(text)
-        if bin_data:
-            return format_response("💳 BIN", {
-                "Схема": bin_data["scheme"],
-                "Тип": bin_data["type"],
-                "Бренд": bin_data["brand"],
-                "Банк": bin_data["bank"],
-                "Страна": bin_data["country"]
-            })
-        return "❌ BIN не найден"
-
-    # GEOIP
-    if re.match(r'^(\d{1,3}\.){3}\d{1,3}$', text) or re.match(r'^[a-zA-Z0-9.-]+\.[a-z]{2,}$', text):
-        ip = socket.gethostbyname(text) if not re.match(r'^(\d{1,3}\.){3}\d{1,3}$', text) else text
-        geo = geoip(ip)
-        if geo:
-            return format_response("🌍 GEOIP", {
-                "IP": ip,
-                "Страна": geo["country"],
-                "Город": geo["city"],
-                "Регион": geo["region"],
-                "Провайдер": geo["isp"],
-                "Координаты": f"{geo['lat']}, {geo['lon']}"
-            })
-        return "❌ IP не найден"
-
-    # TG OSINT
-    if text.startswith("@") or re.match(r'^[a-zA-Z0-9_]{3,}$', text):
-        username = text.lstrip('@')
-        res = telegram_osint(username)
-        if res["exists"]:
-            return f"📱 Telegram: @{username}\n✅ Аккаунт существует\n🔗 {res['url']}"
-        return f"❌ @{username} не найден"
-
-    return "❌ Неизвестная команда. Используй /help"
-
-# ==================== FLASK ====================
-@app.route('/')
-def index():
-    return "<h1>🚀 ROCKET DOX</h1><p>Бот работает 24/7</p>"
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
+# ===== POLLING =====
+def get_updates(offset=0):
+    url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
+    params = {"offset": offset, "timeout": 30}
     try:
-        data = request.get_json()
-        if data and 'message' in data:
-            msg = data['message']
-            chat_id = msg['chat']['id']
-            text = msg.get('text', '')
-            first_name = msg['from'].get('first_name', 'Друг')
-            response = process_message(chat_id, text, first_name)
-            send_message(chat_id, response)
-        return jsonify({"status": "ok"}), 200
+        req = urllib.request.Request(url + "?" + urllib.parse.urlencode(params))
+        response = urllib.request.urlopen(req, timeout=35)
+        data = json.loads(response.read().decode('utf-8'))
+        return data.get("result", []) if data.get("ok") else []
     except Exception as e:
-        print(f"Webhook error: {e}")
-        return jsonify({"status": "error"}), 500
+        print(f"Ошибка получения: {e}")
+        return []
 
-@app.route('/health')
-def health():
-    return jsonify({"status": "online"})
-
+# ===== ЗАПУСК =====
 if __name__ == "__main__":
-    print("🚀 ROCKET DOX — ВСЕ МОДУЛИ АКТИВИРОВАНЫ")
-    app.run(host="0.0.0.0", port=PORT, debug=False)
+    print("=" * 40)
+    print("🚀 ROCKET DOX ЗАПУЩЕН!")
+    print("🤖 Бот работает в режиме POLLING")
+    print("=" * 40)
+    
+    last_update_id = 0
+    while True:
+        try:
+            updates = get_updates(last_update_id + 1)
+            for update in updates:
+                if "message" in update:
+                    msg = update["message"]
+                    chat_id = msg["chat"]["id"]
+                    text = msg.get("text", "")
+                    first_name = msg["from"].get("first_name", "Друг")
+                    
+                    # Проверка лимита
+                    if not check_limit(chat_id):
+                        send_message(chat_id, "⚠️ Лимит 5 запросов в день. Попробуй завтра!")
+                        continue
+                    
+                    response = process_message(text, first_name)
+                    send_message(chat_id, response)
+                    
+                last_update_id = update["update_id"]
+        except Exception as e:
+            print(f"⚠️ Ошибка: {e}")
+        time.sleep(1)
 
