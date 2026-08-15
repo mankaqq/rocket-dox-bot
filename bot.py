@@ -12,7 +12,8 @@ import re
 import socket
 from flask import Flask, request, jsonify
 
-TOKEN = "8905534019:AAFcWkZQsyq4147cFuYID5TuW65ssgmxmx4"
+# ==================== НОВЫЙ ТОКЕН ====================
+TOKEN = "8899375783:AAHCYJjmXGsMQJ436moOH6JUsPYBkzhAFlc"
 PORT = int(os.environ.get("PORT", 5000))
 
 app = Flask(__name__)
@@ -285,7 +286,6 @@ if __name__ == "__main__":
                     text = msg.get("text", "")
                     first_name = msg["from"].get("first_name", "Друг")
                     
-                    # Проверка лимита
                     if not check_limit(chat_id):
                         send_message(chat_id, "⚠️ Лимит 5 запросов в день. Попробуй завтра!")
                         continue
